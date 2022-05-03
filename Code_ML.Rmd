@@ -24,7 +24,7 @@ library(plyr)
 # Data preparation
 ```{r}
 
-training_df = read.csv("/Users/htianyao/Desktop/UThealth Courses/2022 Data Analytics and Prediction/Project data_2022/project_training set.csv", stringsAsFactors = F)
+training_df = read.csv("project_training set.csv", stringsAsFactors = F)
 
 training_df = subset(training_df,select=-c(class.1,id))
 ```
