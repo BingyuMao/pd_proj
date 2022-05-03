@@ -1,0 +1,340 @@
+---
+title: "1976 project"
+author: "Togather"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(lightgbm)
+library(performanceEstimation)
+library(ROSE)
+library(caret)
+library(pROC)
+library(ggplot2)
+library(rnn)
+library(plyr)
+```
+
+# Data preparation
+```{r}
+
+training_df = read.csv("/Users/htianyao/Desktop/UThealth Courses/2022 Data Analytics and Prediction/Project data_2022/project_training set.csv", stringsAsFactors = F)
+
+training_df = subset(training_df,select=-c(class.1,id))
+```
+
+```{r}
+set.seed(3456)
+# Stratified sampling
+trainIndex <- createDataPartition(training_df$class, p = .7, list = FALSE, times = 1)
+train <- training_df[ trainIndex,]
+valid <- training_df[-trainIndex,]
+```
+
+## Resampling by SMOTE
+```{r}
+# SMOTE for train (ONLY)
+# change 0/1 into factor, as required by SMOTE code
+train$class = factor(train$class)
+#train.smote <- SMOTE(class ~ .-id, train, k=4, perc.over = 100)
+# SMOTE resampling, and increase the total sample size
+train.smote <- smote(class ~ .-id, train, k=3, perc.over =1)
+# Check the class balance
+table(train.smote$class)
+```
+
+```{r}
+train.smote$class = as.numeric(train.smote$class)-1
+# Scale the VALID set
+# calculate the mean and std of the training continuous variable
+normParam <- preProcess(train.smote[3:754])
+# apply on the test set
+norm.validData <- predict(normParam, valid[3:754])
+
+# merge the id and gender with these continuous variables
+valid_scaled = cbind(valid[, c("class", "gender")], norm.validData)
+```
+
+```{r}
+# Scale the TRAINING set
+train_scaled = train.smote
+train_scaled[3:754] = scale(train.smote[3:754])
+```
+
+\newpage
+
+
+```{r}
+# Creating Cross-validation sets 
+train_control <- trainControl(method='cv',number=5)
+```
+
+## Logistic Regression
+```{r}
+set.seed(3456)
+model.lr <- train(class~.,data=train_scaled,
+               trControl = train_control,
+               method='glm',
+               family = binomial())
+```
+
+```{r}
+# predict on validation set
+validX = subset(valid_scaled,select=-class)
+validY = as.factor(valid_scaled$class)
+pred.lr <- predict(model.lr, newdata=validX)
+cm <- confusionMatrix(data=as.factor(ifelse(pred.lr>0.5,1,0)),reference=validY, mode = "everything")
+print(cm)
+```
+## kNN
+```{r}
+set.seed(3456)
+model.knn <- train(class~.,data=train_scaled,
+                trControl=train_control,
+                method='knn',
+                tuneLength=10)
+```
+
+```{r}
+# predict on test set
+pred.knn <- predict(model.knn, newdata=validX)
+confusionMatrix(as.factor(ifelse(pred.knn>0.5,1,0)),reference=validY, mode = "everything" )
+```
+
+## Random Forest
+```{r}
+set.seed(3456)
+model.rf <- train(class~.,data=train_scaled,
+               trControl = train_control,
+               method='rf')
+```
+
+```{r}
+feature_importance <- varImp(model.rf, scale=FALSE)
+
+importance_score = feature_importance$importance
+names = rownames(importance_score)
+
+importance_score$name = rep(NA, nrow(importance_score))
+importance_score$name = names
+
+importance_score = importance_score[order(-importance_score$Overall), ]
+
+top50 = importance_score[1:30, ]
+
+rownames(top50) = NULL
+colnames(top50) = c("Importance score", "name")
+
+ggplot(top50, aes(x=name, y=`Importance score`)) + 
+  geom_bar(stat = "identity") +
+  coord_flip()
+
+```
+
+```{r}
+
+# predict on test set
+pred.rf <- predict(model.rf, newdata=validX)
+confusionMatrix(as.factor(ifelse(pred.rf>0.5,1,0)),reference=validY, mode = "everything")
+```
+## SVM
+```{r}
+set.seed(3456)
+model.svm <- train(class~.,data=train_scaled,
+               trControl = train_control,
+               method='svmLinear')
+```
+
+```{r}
+# predict on test set
+pred.svm <- predict(model.svm, newdata=validX)
+confusionMatrix(data=as.factor(ifelse(pred.svm>0.5,1,0)),reference=validY, mode = "everything")
+```
+## LightGBM
+```{r message=FALSE, include=FALSE}
+set.seed(3456)
+
+trainX <- as.matrix(train_scaled[,2:754])
+trainY <- as.matrix(train_scaled$class)
+dtrain <- lgb.Dataset(data=trainX,label=trainY)
+model.lgbm <- lightgbm(
+  objective='binary',
+  data=dtrain
+)
+```
+
+```{r}
+# predict on test set
+pred.lgbm <- predict(model.lgbm, data=as.matrix(validX))
+confusionMatrix(data=as.factor(ifelse(pred.lgbm>0.5,1,0)),reference=validY, mode = "everything")
+```
+## Draw ROC curves
+```{r}
+
+roc.lr <- roc(as.numeric(validY)~ as.numeric(pred.lr))
+roc.knn <- roc(as.numeric(validY)~ as.numeric(pred.knn))
+roc.rf <- roc(as.numeric(validY)~ as.numeric(pred.rf))
+roc.svm <- roc(as.numeric(validY)~ as.numeric(pred.svm))
+roc.lgbm <- roc(as.numeric(validY)~ as.numeric(pred.lgbm))
+auc.lr = round(roc.lr$auc[1],4)
+auc.knn = round(roc.knn$auc[1],4)
+auc.rf = round(roc.rf$auc[1],4)
+auc.svm = round(roc.svm$auc[1],4)
+auc.lgbm = round(roc.lgbm$auc[1],4)
+l.lr = paste('Logistic Regression (auc =',auc.lr,')')
+l.knn = paste('kNN (auc =',auc.knn,')')
+l.rf = paste('Random Forest (auc =',auc.rf,')')
+l.svm = paste('SVM (auc =',auc.svm,')')
+l.lgbm = paste('LightGBM(auc =',auc.lgbm,')')
+plot(roc.lr,col='maroon',main='ROC Curves',xlim=c(1,0))
+plot(roc.knn,col='Gray',add=TRUE,xlim=c(1,0))
+plot(roc.rf,col='Khaki',add=TRUE,xlim=c(1,0))
+plot(roc.svm,col='turquoise',add=TRUE,xlim=c(1,0))
+plot(roc.lgbm,col='orange',add=TRUE,xlim=c(1,0))
+legend('bottomright',legend=c(l.lr,l.knn,l.rf,l.svm,l.lgbm),col=c('maroon','Gray','Khaki','turquoise','orange'),lwd=3)
+```
+
+```{r}
+ggroc(roc.lr, legacy.axes = T) +
+geom_abline(slope = 1 ,intercept = 0) + # add identity line
+theme(
+panel.background = element_blank(), 
+axis.title.x = element_text(size =18, face = 'bold'),
+axis.title.y = element_text(size =18, face = 'bold'),
+panel.border = element_rect(size = 2, fill = NA), 
+axis.text.x = element_text(size = 14, face ='bold'),
+axis.text.y = element_text(size = 14, face ='bold')) +
+xlab('Specificity') +
+ylab('Sensitivity') +
+scale_x_continuous(breaks = seq(0,1,0.25), labels = seq(0,1,0.25) * 100) + 
+scale_y_continuous(breaks = seq(0,1,0.25), labels = seq(0,1,0.25) * 100)
+```
+
+# Conduct PCA
+```{r}
+set.seed(3456)
+
+result <- prcomp(train_scaled[,2:754])
+# create variance explained table
+var_explained_df <- data.frame(PC=paste0('PC',1:408),
+                               var_explained=(result$sdev)^2/sum((result$sdev)^2))
+print(paste('Total variance explained by first 40 PCs is',sum(var_explained_df$var_explained[1:40])))
+#create scree plot
+#screeplot(pca.scaled,main='Scree Plot',type='lines')
+ggplot(var_explained_df[1:9,],aes(PC,var_explained)) +
+  geom_col()+
+  labs(title='Scree plot: PCA on scaled resampling data')
+```
+
+```{r}
+#predict PCs for test set
+pca.trainX <- data.frame(result$x[,1:40])
+pca.train <- cbind(pca.trainX,train_scaled$class)
+colnames(pca.train) <- c(paste0('PC',c(1:40)),'class')
+pca.validX<- predict(result,newdata=validX)[,1:40]
+```
+
+
+## Logistic regression
+```{r}
+set.seed(3456)
+model.lr.pca <- train(class~., data=pca.train,
+               trControl = train_control,
+               method='glm',
+               family = binomial())
+```
+
+```{r}
+# predict on test set
+pred.lr.pca <- predict(model.lr.pca, newdata=pca.validX)
+confusionMatrix(data=as.factor(ifelse(pred.lr.pca>0.5,1,0)),reference=validY, mode = "everything")
+```
+
+## LightGBM
+```{r message=FALSE}
+set.seed(3456)
+pca.trainX <- as.matrix(pca.train[,1:40])
+pca.trainY <- as.matrix(pca.train$class)
+dtrain <- lgb.Dataset(data=pca.trainX,label=pca.trainY)
+model.lgbm.pca <- lightgbm(
+  objective='binary',
+  data=dtrain
+)
+```
+
+```{r}
+# predict on test set
+pred.lgbm.pca <- predict(model.lgbm.pca, data=as.matrix(pca.validX))
+confusionMatrix(data=as.factor(ifelse(pred.lgbm.pca>0.5,1,0)),reference=validY, mode = "everything")
+```
+## kNN
+```{r}
+set.seed(3456)
+model.knn.pca <- train(class~.,data=pca.train,
+                trControl=train_control,
+                method='knn',
+                tuneLength=10)
+```
+
+```{r}
+# predict on test set
+pred.knn.pca <- predict(model.knn.pca, newdata=pca.validX)
+confusionMatrix(as.factor(ifelse(pred.knn.pca>0.5,1,0)),reference=validY, mode = "everything")
+```
+## Random Forest
+```{r}
+set.seed(3456)
+model.rf.pca <- train(class~.,data=pca.train,
+               trControl = train_control,
+               method='rf')
+```
+
+```{r}
+# predict on test set
+pred.rf.pca <- predict(model.rf.pca, newdata=pca.validX)
+confusionMatrix(data=as.factor(ifelse(pred.rf.pca>0.5,1,0)),reference=validY, mode = "everything")
+```
+
+## SVM
+```{r}
+set.seed(3456)
+model.svm.pca <- train(class~.,data=pca.train,
+               trControl = train_control,
+               method='svmLinear')
+```
+
+```{r}
+# predict on test set
+pred.svm.pca <- predict(model.svm.pca, newdata=pca.validX)
+confusionMatrix(data=as.factor(ifelse(pred.svm.pca>0.5,1,0)),reference=validY, mode = "everything")
+```
+## ROC curves after PCA
+```{r}
+roc.lr.pca <- roc(as.numeric(validY)~ as.numeric(pred.lr.pca))
+roc.knn.pca <- roc(as.numeric(validY)~ as.numeric(pred.knn.pca))
+roc.rf.pca <- roc(as.numeric(validY)~ as.numeric(pred.rf.pca))
+roc.svm.pca <- roc(as.numeric(validY)~ as.numeric(pred.svm.pca))
+roc.lgbm.pca <- roc(as.numeric(validY)~ as.numeric(pred.lgbm.pca))
+auc.lr.pca = round(roc.lr.pca$auc[1],4)
+auc.knn.pca = round(roc.knn.pca$auc[1],4)
+auc.rf.pca = round(roc.rf.pca$auc[1],4)
+auc.svm.pca = round(roc.svm.pca$auc[1],4)
+auc.lgbm.pca = round(roc.lgbm.pca$auc[1],4)
+l.lr.pca = paste('Logistic Regression (auc =',auc.lr.pca,')')
+l.knn.pca = paste('kNN (auc =',auc.knn.pca,')')
+l.rf.pca = paste('Random Forest (auc =',auc.rf.pca,')')
+l.svm.pca = paste('SVM (auc =',auc.svm.pca,')')
+l.lgbm.pca = paste('LightGBM(auc =',auc.lgbm.pca,')')
+plot(roc.lr.pca,col='maroon',main='ROC Curves',xlim=c(1,0))
+plot(roc.knn.pca,col='Gray',add=TRUE)
+plot(roc.rf.pca,col='Khaki',add=TRUE)
+plot(roc.svm.pca,col='turquoise',add=TRUE)
+plot(roc.lgbm.pca,col='orange',add=TRUE)
+legend('bottomright',legend=c(l.lr.pca,l.knn.pca,l.rf.pca,l.svm.pca,l.lgbm.pca),col=c('maroon','Gray','Khaki','turquoise','orange'),lwd=3)
+```
